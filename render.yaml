@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: aitokenshub
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run.py
+    envVars:
+      - key: RUN_BOT
+        value: 1
+      - key: PYTHONUNBUFFERED
+        value: 1
+      # Render PORT khud set karta hai. Baaki Render dashboard me daalo:
+      # BOT_TOKEN, ADMIN_ID, OPENROUTER_KEY
