@@ -108,7 +108,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Chat directly with AI (costs credits)."""
+    """Chat directly with AI (costs credits). No API key needed -
+    calls OpenRouter directly instead of going through the HTTP API."""
     u = update.effective_user
     user = C.get_user(u.id)
     if not user:
@@ -117,6 +118,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if not text:
         return
+    import backend as B
+    if not B.OPENROUTER_KEY:
+        await update.message.reply_text("⚠️ AI is not configured yet. Please try again later.")
+        return
     est = C.estimate_tokens(text) + 500
     if user["credits"] < est:
         await update.message.reply_text(
@@ -124,25 +129,22 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Refer friends to earn more! 👥")
         return
     await context.bot.send_chat_action(chat_id=u.id, action="typing")
-    # call backend locally
-    import requests as rq
     try:
-        keys = C.list_user_keys(u.id)
-        key = list(keys.keys())[0] if keys else C.create_api_key(u.id)
-        base = PUBLIC_URL or f"http://localhost:{os.getenv('PORT', 5002)}"
-        r = rq.post(f"{base}/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json={"messages": [{"role": "user", "content": text}],
-                          "max_tokens": 500},
-                    timeout=90)
-        d = r.json()
-        if "choices" in d:
-            reply = d["choices"][0]["message"]["content"]
-            left = d.get("credits_remaining", "?")
-            await update.message.reply_text(reply + f"\n\n_💰 {fmt(left)} left_" if isinstance(left, int) else reply,
-                                            parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"⚠️ Error: {d.get('error', 'unknown')}")
+        # Blocking requests call -> thread, so the bot never freezes.
+        reply, model_used, err = await asyncio.to_thread(
+            B._call_openrouter,
+            [{"role": "user", "content": text}], None, 500)
+        if err or not reply:
+            await update.message.reply_text(f"⚠️ AI error: {err or 'empty response, try again'}")
+            return
+        actual = C.estimate_tokens(text) + C.estimate_tokens(reply)
+        C.deduct_credits(u.id, actual)
+        left = C.get_user(u.id)["credits"]
+        suffix = f"\n\n💰 {fmt(left)} tokens left"
+        # Plain text (no Markdown): AI replies often contain * _ ` which
+        # would break Telegram's Markdown parsing. Cap at ~4000 chars.
+        msg = reply if len(reply) + len(suffix) <= 4000 else reply[:3950] + "…"
+        await update.message.reply_text(msg + suffix)
     except Exception as e:
         await update.message.reply_text(f"⚠️ Failed: {type(e).__name__}")
 
