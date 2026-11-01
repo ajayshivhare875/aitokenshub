@@ -30,6 +30,7 @@ _MISSING = object()
 # transient outage permanently overwrites real rows with defaults.
 _DB_ERROR = object()
 _logged_ok = False
+_table_ensured = False
 
 
 def _connect():
@@ -53,10 +54,34 @@ def _note_ok_once():
         print(f"[db_store] connected: using Supabase {TABLE} for persistence", flush=True)
 
 
+def _ensure_table():
+    """Create the kv table if it does not exist (idempotent, once per process)."""
+    global _table_ensured
+    if _table_ensured:
+        return
+    try:
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"CREATE TABLE IF NOT EXISTS {TABLE} ("
+                    "key text primary key, "
+                    "value jsonb not null, "
+                    "updated_at timestamptz default now())"
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        _table_ensured = True
+    except Exception as e:
+        print(f"[db_store] ensure table failed: {e}", file=sys.stderr, flush=True)
+
+
 def db_load(key, default=_MISSING):
     """Return the stored JSON value for key, or `default` when absent/unreachable."""
     if not db_enabled():
         return default
+    _ensure_table()
     try:
         conn = _connect()
         try:
@@ -80,6 +105,7 @@ def db_save(key, data):
     """Upsert the JSON value for key. True on success, False on failure."""
     if not db_enabled():
         return False
+    _ensure_table()
     try:
         conn = _connect()
         try:
