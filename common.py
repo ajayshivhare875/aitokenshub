@@ -1,6 +1,8 @@
 """AITokensHub - shared logic: users, credits, referrals, API keys."""
-import os, json, secrets, time
+import os, json, secrets, sys, time
 from datetime import datetime
+
+import db_store  # Supabase/Postgres backend; falls back to files when DATABASE_URL is unset
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -14,15 +16,63 @@ REFERRAL_REWARD = 1_000_000    # 1M tokens per successful referral
 MAX_REFS_PER_DAY = 20          # anti-abuse: max referrals counted per day
 
 
+def _doc_key(path):
+    return os.path.basename(path)
+
+
+# Docs whose last load hit a DB error. While a doc is tainted, save_json
+# REFUSES to write it to Supabase: our in-memory copy came from a failed
+# read, and writing it would permanently wipe the real data. A later
+# successful load_json clears the taint.
+_tainted_docs = set()
+
+
 def load_json(path, default):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return default
+    doc = _doc_key(path)
+    if db_store.db_enabled():
+        val = db_store.db_load(doc, db_store._MISSING)
+        if val is db_store._DB_ERROR:
+            # DB unreachable: this is NOT "no data". Serve the local file
+            # (or defaults) so the bot keeps responding, but taint the doc
+            # so no save can overwrite Supabase from this failed read.
+            print(f"[storage] DB read failed for {doc!r}: using local copy, "
+                  f"Supabase writes paused for this doc", file=sys.stderr, flush=True)
+            _tainted_docs.add(doc)
+        else:
+            _tainted_docs.discard(doc)
+            if val is not db_store._MISSING:
+                return val
+            # One-time seed: a local file left behind seeds the DB.
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        file_data = json.load(f)
+                    db_store.db_save(doc, file_data)
+                    return file_data
+                except Exception:
+                    pass
+            return default
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return default
+    return default
 
 
 def save_json(path, data):
+    """Save a doc. A doc tainted by a failed read is NEVER written to
+    Supabase: the in-memory copy may be empty defaults, and persisting it
+    would wipe the real data (this is how deploys used to lose data)."""
+    doc = _doc_key(path)
+    if db_store.db_enabled():
+        if doc in _tainted_docs:
+            print(f"[storage] REFUSING Supabase write for {doc!r}: last read failed; "
+                  f"kept local file copy only", file=sys.stderr, flush=True)
+        else:
+            db_store.db_save(doc, data)
+    # Always keep the local file copy too, so nothing is ever lost.
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f)
