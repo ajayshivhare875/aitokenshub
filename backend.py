@@ -61,8 +61,13 @@ def _call_openrouter(messages, model=None, max_tokens=1000):
             }, timeout=60)
             if r.status_code == 200:
                 d = r.json()
-                text = d["choices"][0]["message"]["content"]
-                return text, m, ""
+                text = (d["choices"][0]["message"].get("content") or "").strip()
+                if text:
+                    return text, m, ""
+                # Reasoning models sometimes return HTTP 200 with empty
+                # content (output stays in reasoning tokens). Treat as a
+                # miss and fall through to the next model in the chain.
+                last_err = f"{m}: empty response, trying next"
             last_err = f"{m}: HTTP {r.status_code}"
         except Exception as e:
             last_err = f"{m}: {type(e).__name__}"
